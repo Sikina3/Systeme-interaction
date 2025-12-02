@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">GestFace</string>
+    <string name="accessibility_service_description">Service d’accessibilité de GestFace</string>
+</resources>
