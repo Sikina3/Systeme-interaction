@@ -59,4 +59,7 @@ dependencies {
     // ML Kit Face Detection
     implementation("com.google.mlkit:face-detection:16.1.5")
     implementation("androidx.lifecycle:lifecycle-service:2.10.0")
+
+    //mediapipe
+    implementation ("com.google.mediapipe:tasks-vision:latest.release")
 }
