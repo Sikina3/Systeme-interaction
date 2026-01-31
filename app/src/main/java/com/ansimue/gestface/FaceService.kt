@@ -1,70 +1,92 @@
 package com.ansimue.gestface
 
+import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
-import android.app.Notification
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
 import android.os.VibrationEffect
 import android.os.Vibrator
 import androidx.annotation.OptIn
-import androidx.core.app.NotificationCompat
-import androidx.lifecycle.LifecycleService
-import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.core.*
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
-import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.face.*
+import androidx.lifecycle.LifecycleService
+import com.google.mediapipe.framework.image.BitmapImageBuilder
+import com.google.mediapipe.tasks.components.containers.NormalizedLandmark
+import com.google.mediapipe.tasks.vision.core.RunningMode
+import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarker
+import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarker.HandLandmarkerOptions
+import com.google.mediapipe.tasks.core.BaseOptions
+import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerResult
 import java.util.concurrent.Executors
+import android.graphics.*
+import android.media.Image
+import java.io.ByteArrayOutputStream
+import kotlin.math.sqrt
 
 class FaceService : LifecycleService() {
 
     private val executor = Executors.newSingleThreadExecutor()
-    private lateinit var detector: FaceDetector
+    private lateinit var handLandmarker: HandLandmarker
 
-    private var enabled = true
     private var lastAction = 0L
 
     override fun onCreate() {
         super.onCreate()
 
         startForeground(1, createNotification())
-        detector = createFaceDetector()
+        handLandmarker = createHandLandmarker()
         startCamera()
     }
 
-    override fun onBind(
-        intent: Intent
-    ): IBinder? = super.onBind(intent)
+    override fun onBind(intent: Intent): IBinder? = super.onBind(intent)
 
     private fun createNotification(): Notification {
-        val channelId = "face_service"
+
+        val channelId = "hand_service"
 
         if (Build.VERSION.SDK_INT >= 26) {
             val channel = NotificationChannel(
                 channelId,
-                "GestFace Tracking",
+                "Hand control",
                 NotificationManager.IMPORTANCE_LOW
             )
-            val manager = getSystemService(NotificationManager::class.java)
-            manager.createNotificationChannel(channel)
+            getSystemService(NotificationManager::class.java)
+                .createNotificationChannel(channel)
         }
 
         return NotificationCompat.Builder(this, channelId)
-            .setContentTitle("GestFace actif")
-            .setContentText("Analyse des gestes en cours…")
+            .setContentTitle("Hand control actif")
+            .setContentText("Contrôle par la main")
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .build()
     }
 
-    @OptIn(
-        ExperimentalGetImage::class
-    )
+    private fun createHandLandmarker(): HandLandmarker {
+
+        val options = HandLandmarkerOptions.builder()
+            .setBaseOptions(
+                BaseOptions.builder()
+                    .setModelAssetPath("hand_landmarker.task")
+                    .build()
+            )
+            .setRunningMode(RunningMode.VIDEO)
+            .setNumHands(1)
+            .build()
+
+        return HandLandmarker.createFromOptions(this, options)
+    }
+
+    @OptIn(ExperimentalGetImage::class)
     private fun startCamera() {
+
         val providerFuture = ProcessCameraProvider.getInstance(this)
 
         providerFuture.addListener({
+
             val provider = providerFuture.get()
 
             val analysis = ImageAnalysis.Builder()
@@ -72,23 +94,29 @@ class FaceService : LifecycleService() {
                 .build()
 
             analysis.setAnalyzer(executor) { proxy ->
-                val media = proxy.image ?: return@setAnalyzer proxy.close()
 
-                val img = InputImage.fromMediaImage(
-                    media,
-                    proxy.imageInfo.rotationDegrees
+                val image = proxy.image
+                if (image == null) {
+                    proxy.close()
+                    return@setAnalyzer
+                }
+
+                val mpImage =
+                    com.google.mediapipe.framework.image.MediaImageBuilder(image).build()
+
+                val result = handLandmarker.detectForVideo(
+                    mpImage,
+                    System.currentTimeMillis()
                 )
 
-                detector.process(img)
-                    .addOnSuccessListener { faces ->
-                        if (faces.isNotEmpty()) handle(faces[0])
-                    }
-                    .addOnCompleteListener { proxy.close() }
+                handleHand(result)
+
+                proxy.close()
             }
 
             provider.unbindAll()
             provider.bindToLifecycle(
-                this, // UN VRAI LIFECYCLE OWNER
+                this,
                 CameraSelector.DEFAULT_FRONT_CAMERA,
                 analysis
             )
@@ -96,80 +124,48 @@ class FaceService : LifecycleService() {
         }, ContextCompat.getMainExecutor(this))
     }
 
-    private fun createFaceDetector(): FaceDetector {
-        return FaceDetection.getClient(
-            FaceDetectorOptions.Builder()
-                .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_ALL)
-                .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
-                .build()
-        )
-    }
-
-    private fun handle(face: Face) {
-        val now = System.currentTimeMillis()
-        if (now - lastAction < 700) return
-
-        val smile = face.smilingProbability ?: 0f
-        val left = face.leftEyeOpenProbability ?: 1f
-        val right = face.rightEyeOpenProbability ?: 1f
-        val pitch = face.headEulerAngleX
-        val yaw = face.headEulerAngleY
-        val roll = face.headEulerAngleZ
+    private fun handleHand(result: HandLandmarkerResult) {
 
         val svc = MyAccessibilityService.instance ?: return
 
-        // Toggle ON/OFF
-        if (roll > 15) {
-            enabled = !enabled
-            vibrate()
-            lastAction = now
-            return
-        }
+        if (result.landmarks().isEmpty()) return
 
-        if (!enabled) return
+        val now = System.currentTimeMillis()
+        if (now - lastAction < 800) return
 
-        if (smile > 0.8f) {
-            vibrate()
-            svc.scrollDown()
-            lastAction = now
-            return
-        }
+        val hand = result.landmarks()[0]
 
-        if (left < 0.25f && right > 0.5f) {
-            vibrate()
-            svc.scrollUp()
-            lastAction = now
-            return
-        }
+        val index = hand[8]
+        val thumb = hand[4]
 
-        if (left < 0.25f && right < 0.25f) {
-            vibrate()
-            svc.goBack()
-            lastAction = now
-            return
-        }
+        val d = distance(index, thumb)
 
-        if (pitch < -10) {
+        // pinch
+        if (d < 0.05f) {
             vibrate()
-            svc.goHome()
+            svc.performClick(540f, 1200f)
             lastAction = now
-            return
         }
+    }
 
-        if (yaw > 20) {
-            vibrate()
-            svc.switchApps()
-            lastAction = now
-            return
-        }
+    private fun distance(a: NormalizedLandmark, b: NormalizedLandmark): Float {
+        val dx = a.x() - b.x()
+        val dy = a.y() - b.y()
+        return sqrt(dx * dx + dy * dy)
     }
 
     private fun vibrate() {
         val vib = getSystemService(VIBRATOR_SERVICE) as Vibrator
         if (Build.VERSION.SDK_INT >= 26) {
-            vib.vibrate(VibrationEffect.createOneShot(150, VibrationEffect.DEFAULT_AMPLITUDE))
+            vib.vibrate(
+                VibrationEffect.createOneShot(
+                    80,
+                    VibrationEffect.DEFAULT_AMPLITUDE
+                )
+            )
         } else {
-            vib.vibrate(150)
+            @Suppress("DEPRECATION")
+            vib.vibrate(80)
         }
     }
 }
